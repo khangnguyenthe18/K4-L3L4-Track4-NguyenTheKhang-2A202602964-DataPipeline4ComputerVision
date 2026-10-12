@@ -100,13 +100,50 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ## Bước 4 · Gold
 
 ### Câu 6
+Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+Dựa vào file bằng chứng `leakage.json` (tổng số 1019 khung hình hợp lệ thuộc 26 trip):
+- **Chia THEO KHUNG HÌNH (ngẫu nhiên 70/15/15)**: Có tới **26/26 trip bị chia cắt** (`straddling`), và cả **26/26 trip đều có khung hình xuất hiện ở cả tập train lẫn test**.
+- **Chia THEO TRIP (Gold của pipeline)**: Có đúng **0 trip bị chia cắt**, mỗi trip hoàn toàn thuộc về duy nhất một split.
+
+**Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo (Data Leakage)**:
+- Video xe tự lái có tính tự tương quan thời gian và không gian cực kỳ cao. Hai khung hình liên tiếp cách nhau chỉ 0.5 giây gần như giống hệt nhau về góc máy, thời tiết, biển báo và xe cộ xung quanh.
+- Khi chia theo khung hình, mô hình đã "nhìn thấy" khung hình ở giây thứ $t$ trong tập train và đi dự đoán khung hình ở giây thứ $t+0.5$ trong tập test. Mô hình chỉ việc học vẹt (ghi nhớ khung cảnh) thay vì học cách khái quát hóa hành vi lái xe. Kết quả là điểm kiểm thử (accuracy/mAP/F1) cao ngất ngưởng giả tạo trong phòng thí nghiệm, nhưng khi đem mô hình ra xe thực tế gặp cung đường mới thì xe sẽ mất kiểm soát và gây tai nạn.
 
 ### Câu 7
+Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
+
+- **Băm nội dung (Content-addressable Hash)**: `dataset_version` (`6cd8787625c0`) được tính toán từ mã băm nội dung của các bảng và manifest. Điều này đảm bảo tính xác định (determinism) và tính tái lập (reproducibility) trong MLOps: bất kể chạy ở máy nào, vào ngày nào, nếu dữ liệu đầu vào và cấu hình giống nhau thì mã băm luôn giống nhau tuyệt đối. Ngược lại, nếu dùng ngày giờ hoặc số đếm, chạy lại cùng một dữ liệu sẽ sinh ra version mới, gây lãng phí bộ nhớ và phá vỡ liên kết lineage.
+- **Hai lần chạy liên tiếp**: Cho kết quả `dataset_version` **giống hệt nhau** (`6cd8787625c0`), chứng minh tính idempotent và tính toàn vẹn của pipeline.
+- **Vì sao khác bạn bè**: Trong model `dbt/models/gold/gold_dataset_frames.sql`, thứ tự các trip được xếp ngẫu nhiên có muối băm: `order by md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`. MSSV của tôi là `2A202602964`, làm cho thứ tự sắp xếp 26 trip khác với các bạn khác, dẫn tới các trip được phân bổ vào các split train, val, test khác nhau, sinh ra mã băm `dataset_version` độc nhất cho riêng tôi.
+
+### Câu 8
+Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
+
+Nội dung trường `lineage` trong file `manifest.json` của dataset tôi (`6cd8787625c0`):
+- `bronze.raw_telemetry_a`: commit version 0
+- `bronze.raw_telemetry_b`: commit version 0
+- `bronze.trips_raw`: commit version 0
+- `bronze.video_files`: commit version 1
+- `silver.frames`: commit version 53
+- `silver.telemetry`: commit version 1
+- `silver.frames_flagged`: commit version 1
+- `silver.frame_telemetry`: commit version 1
+- Mã băm SHA256 của video gốc:
+  - `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  - `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+
+**Thông tin giúp tái tạo lại đúng 100% dataset sau 3 tháng**:
+1. Hai video gốc có đúng mã băm sha256 nêu trên và file telemetry gốc.
+2. Tính năng Time Travel của Delta Lake để truy xuất đúng commit version của các bảng Silver/Gold ghi trong lineage.
+3. Mã số sinh viên `LAB_STUDENT_ID=2A202602964` và mã nguồn pipeline (phiên bản Git commit tương ứng).
+
+## Bước 5 · Điều phối và phục vụ
+
+### Câu 9
 
 (trả lời ở đây)
 
-### Câu 8
+### Câu 10
 
 (trả lời ở đây)
