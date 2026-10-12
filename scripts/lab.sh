@@ -9,6 +9,7 @@
 #   scripts/lab.sh dbt <lệnh> [tham số]    ví dụ: dbt run --select silver_telemetry | dbt test --select gold_dataset_frames
 #   scripts/lab.sh shell                   mở shell trong container
 set -e
+export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 PY=/home/airflow/lab-venv/bin/python
 X="docker compose exec -T"
