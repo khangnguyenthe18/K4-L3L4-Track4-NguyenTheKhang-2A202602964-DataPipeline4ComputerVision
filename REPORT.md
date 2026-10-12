@@ -35,9 +35,29 @@ Pipeline giữ mỗi nguồn một bảng bronze riêng và để toàn bộ c�
 ## Bước 2 · Silver telemetry
 
 ### Câu 2
+Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
+
+Pipeline đưa hai nguồn về một schema chuẩn thông qua các model staging của dbt:
+- **Đơn vị**: Tốc độ nguồn B được đổi từ km/h sang m/s (`spd_kmh / 3.6`). Góc lái và bàn đạp được quy đổi về cùng thang đo chuẩn.
+- **Kiểu thời gian & Độ lệch đồng hồ**: Chuyển đổi timestamp Unix epoch ms của nguồn B sang timestamp UTC, đồng thời tự động trừ đi 1500 ms độ lệch đồng hồ (`to_timestamp((timestamp_ms - 1500) / 1000.0)`).
+- **Bằng chứng đúng**: Thời điểm bắt đầu của telemetry B (`min(ts)`) sau chuẩn hóa là `2025-10-08 14:30:00.009000+00:00`, trùng khớp chính xác với mốc bắt đầu của video B (`2025-10-08 14:30:00`) trong phạm vi 0.5s (test `drive B clock offset removed` báo PASS).
+- **Bảng Quarantine thực tế** (tổng cộng 106 dòng bị cách ly):
+  | drive_id | reject_reason | so_dong |
+  |---|---|---|
+  | drive_a | duplicate | 20 |
+  | drive_a | speed_missing | 30 |
+  | drive_a | speed_out_of_range | 3 |
+  | drive_b | duplicate | 20 |
+  | drive_b | speed_missing | 30 |
+  | drive_b | speed_out_of_range | 3 |
+- **Vì sao dòng lỗi vào `rejects` thay vì bị xóa**: Áp dụng mô hình Data Quality Quarantine. Dòng lỗi không bị xóa âm thầm nhằm bảo tồn dữ liệu phục vụ điều tra lỗi phần cứng cảm biến, theo dõi tỷ lệ suy giảm chất lượng dữ liệu (data degradation), và cho phép hồi phục dữ liệu khi luật làm sạch được cập nhật.
+
+## Bước 3 · Silver frames
+
+### Câu 4
 
 (trả lời ở đây)
 
-### Câu 3
+### Câu 5
 
 (trả lời ở đây)
