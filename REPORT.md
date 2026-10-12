@@ -54,10 +54,59 @@ Pipeline đưa hai nguồn về một schema chuẩn thông qua các model stagi
 
 ## Bước 3 · Silver frames
 
+### Câu 3
+Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
+
+- **Phân biệt `warn` và `error`**:
+  - `max_gap_ms` đặt mức **WARN**: Mất tín hiệu cảm biến trong thời gian ngắn là hiện tượng vật lý bình thường khi xe di chuyển qua đường hầm, tán cây hoặc khu vực sóng GPS yếu. Đây là chỉ báo vận hành (operational indicator) để theo dõi chất lượng, không nên dừng (break) toàn bộ pipeline.
+  - `in_range` đặt mức **ERROR**: Vận tốc vượt ngưỡng vật lý (0..70 m/s tương đương 0..252 km/h) là dữ liệu rác nghiêm trọng. Nếu dữ liệu này lọt vào tập huấn luyện mô hình xe tự lái sẽ gây sai lệch hành vi điều khiển và đe dọa an toàn tính mạng, do đó bắt buộc phải chặn đứng pipeline ngay lập tức.
+- **Kết quả thí nghiệm `break-gate` (`break_gate.json`)**:
+  - Khi cố tình nới lỏng luật lọc tốc độ lên 1000 m/s (`relaxed_max_speed_mps: 1000`), dbt test cho kết quả: `PASS=5 WARN=1 ERROR=1 SKIP=0`.
+  - Cổng chất lượng đã bắt đúng lỗi: test `in_range_silver_telemetry_speed_mps__70__0` báo FAIL và bắt được đúng **6 dòng** tốc độ vô lý (3 dòng của drive A và 3 dòng của drive B). Khi khôi phục luật gốc, test trở lại `PASS=6 WARN=1 ERROR=0`.
+  - **Ý nghĩa**: Cổng chất lượng (Quality Gate) đóng vai trò lá chắn độc lập (fail-fast mechanism), đảm bảo dữ liệu vi phạm hợp đồng dữ liệu (data contract) không bao giờ bị rò rỉ sang các tầng phân tích Gold hoặc mô hình AI.
+
+## Bước 3 · Silver frames
+
 ### Câu 4
+Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
+
+Dựa vào file bằng chứng `idempotency.json` chạy trên partition `trip-05905`:
+- **Trước khi chạy lại**: Bảng `silver.frames` có **1246 dòng**, dấu vân tay SHA256 là `6c7480dfde7e`.
+- **Sau 2 lần chạy lại liên tiếp**: Số dòng vẫn là **1246 dòng**, dấu vân tay vẫn là `6c7480dfde7e` (giá trị `unchanged: true`).
+- **Khi mô phỏng ghi kiểu `append` sai**: Một trip có 60 khung sau 2 lần chạy bị đội lên **120 dòng** (bị nhân đôi 2x).
+
+**Vì sao Delta `overwrite` theo partition an toàn hơn "xóa rồi ghi lại":**
+- Delta Lake sử dụng cơ chế ghi đè phân vùng nguyên tử (`replaceWhere="trip_id = '...'"` kết hợp ACID Transaction log). Thao tác ghi chỉ tạo ra các file Parquet mới và commit vào transaction log ở trạng thái sẵn sàng. Nếu tiến trình bị sập nguồn hoặc crash giữa chừng, transaction bị hủy bỏ hoàn toàn (rollback), các reader vẫn đọc được bản ghi cũ nguyên vẹn.
+- Ngược lại, phương pháp thủ công "xóa rồi ghi lại" gồm hai thao tác riêng biệt không có tính nguyên tử. Nếu hệ thống sập ngay sau lệnh xóa (DELETE/DROP) và trước khi kịp ghi dữ liệu mới, toàn bộ dữ liệu của phân vùng đó sẽ bị mất trắng (data corruption/loss).
+
+### Câu 5
+Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
+
+- **Khung đen và Khung tối**:
+  - *Khung đen* (`is_black`): Do camera bị lỗi cảm biến, đứt kết nối hoặc ống kính bị che kín hoàn toàn (`brightness < 5`). Không chứa bất kỳ thông tin thị giác nào $\rightarrow$ pipeline loại bỏ hoàn toàn khỏi tập huấn luyện Gold.
+  - *Khung tối* (`is_dark`): Do xe di chuyển trong hầm, ban đêm hoặc dưới bóng cây râm mát (`brightness < 30`). Khung hình vẫn chứa đường nét xe, làn đường và biển báo $\rightarrow$ pipeline **gắn cờ nhưng giữ lại** (`dark_kept` ở drive B lên tới 61 khung).
+  - *Quan điểm*: Tôi hoàn toàn đồng ý, vì mô hình thị giác máy tính của xe tự lái cần học dữ liệu thiếu sáng để vận hành ban đêm, trong khi khung đen hoàn toàn chỉ là nhiễu vô giá trị.
+- **Bảng số khung trùng theo ngưỡng dHash từ `threshold.json`**:
+
+| dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
+|---|---|---|
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
+
+- **Lựa chọn ngưỡng**: Tôi chọn ngưỡng **2** (ngưỡng mặc định của pipeline). Vì ngưỡng 0 quá khắt khe, chỉ bắt trùng bit tuyệt đối và bỏ sót các khung xe đứng yên có nhiễu cảm biến nhẹ. Ngưỡng 6 lại quá lỏng lẻo, loại bỏ nhầm tới 363 khung ở A và 244 khung ở B (mất các tình huống xe bò chậm ở giao lộ). Ngưỡng 2 cân bằng tối ưu giữa việc lọc khung đứng hình và giữ lại dữ liệu chuyển động.
+- **Mối liên hệ với tốc độ xe**: Xe chạy nhanh (vận tốc lớn) thì phối cảnh thay đổi liên tục giữa các frame cách nhau 0.5s, khoảng cách dHash lớn nên số khung trùng rất ít (như drive B chỉ có 53 khung trùng). Xe chạy chậm hoặc dừng chờ đèn đỏ thì phối cảnh không đổi, số khung trùng tăng đột biến (như drive A có camera đứng hình 6 giây và xe chạy chậm có tới 149 khung trùng).
+
+## Bước 4 · Gold
+
+### Câu 6
 
 (trả lời ở đây)
 
-### Câu 5
+### Câu 7
+
+(trả lời ở đây)
+
+### Câu 8
 
 (trả lời ở đây)
