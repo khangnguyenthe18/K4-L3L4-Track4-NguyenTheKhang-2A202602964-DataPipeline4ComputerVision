@@ -141,9 +141,52 @@ Nội dung trường `lineage` trong file `manifest.json` của dataset tôi (`6
 ## Bước 5 · Điều phối và phục vụ
 
 ### Câu 9
+Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+- **Khi trip `trip-05905` bị sập**: Đúng **1 task** `silver_frames` con ứng với `trip-05905` chuyển sang màu đỏ (**FAILED**) do biến môi trường `LAB_FAIL_ONCE=trip-05905` kích hoạt ngoại lệ mô phỏng crash. Các task hạ nguồn phụ thuộc phía sau gồm `dbt_run_silver`, `dbt_test_silver`, `publish_lake`, `dbt_run_gold`, `dbt_test_gold`, `export_dataset`, `publish_warehouse` đều chuyển sang trạng thái **`upstream_failed`**.
+- **Khi xử lý khôi phục**: Trong giao diện Airflow Graph View, tôi chỉ nhấp vào đúng task đỏ của `trip-05905` và chọn **Clear**. Airflow chỉ lập lịch chạy lại duy nhất task con đó mà không phải chạy lại 25 task trip khác.
+- **Kết quả dữ liệu & phiên bản**:
+  - Dữ liệu hoàn toàn **không bị nhân đôi** nhờ cơ chế `overwrite` theo partition của Delta Lake (số dòng của `silver.frames` vẫn giữ chuẩn 1246 dòng).
+  - `dataset_version` **không hề thay đổi**, vẫn giữ nguyên `6cd8787625c0`.
+  - Toàn bộ 27/27 kiểm tra của `scripts/lab.sh verify` đều ĐẠT.
+- **Bằng chứng**: Ảnh chụp log task đỏ thấy rõ dòng `simulated crash while extracting trip-05905` (`report/screenshots/airflow_task_failed.png`) và ảnh DAG xanh toàn bộ sau khi clear task (`report/screenshots/airflow_graph.png`).
 
 ### Câu 10
+Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi mở rộng quy mô từ 2 xe lên 500 xe/ngày (khoảng 6.500 trip, hàng triệu khung hình và hàng chục TB video mỗi ngày):
+1. **Xử lý giải mã video (FFmpeg đơn luồng trên container Airflow)** (Slide 24):
+   - *Vấn đề*: Giải mã video nén H.264/H.265 là nút thắt cổ chai tính toán nặng nhất (CPU & RAM bound). Một container không thể gánh nổi hàng nghìn video song song, sẽ dẫn đến cạn kiệt tài nguyên máy chủ và timeout.
+   - *Giải pháp*: Tách thành cụm worker xử lý video phân tán (Distributed Video Workers trên Ray hoặc Kubernetes Pods có GPU/NVDEC tăng tốc phần cứng), hoặc dùng Serverless Compute (AWS Batch / Google Cloud Run).
+2. **Công cụ biến đổi DuckDB đơn máy** (Slide 22, 23):
+   - *Vấn đề*: DuckDB được thiết kế in-process cực nhanh cho dữ liệu vừa và nhỏ (GBs), nhưng khi dữ liệu telemetry và frame metadata lên tới hàng chục TB, việc đọc ghi và join ASOF trên một node sẽ bị tràn RAM (OOM) và nghẽn băng thông đĩa.
+   - *Giải pháp*: Chuyển đổi sang công cụ tính toán phân tán (Distributed Query Engine) như **Apache Spark** hoặc **Databricks / Trino**, kết hợp lưu trữ Delta Lake phân tán trên AWS S3 / MinIO Cluster.
+3. **Bộ điều phối Airflow LocalExecutor** (Slide 26, 27):
+   - *Vấn đề*: LocalExecutor chạy các task dưới dạng process cục bộ. Khi số lượng trip tăng lên 6.500 task con mỗi ngày, scheduler của máy chủ điều phối sẽ bị nghẽn hàng đợi (queue saturation) và cạn kiệt process/memory.
+   - *Giải pháp*: Nâng cấp lên **Airflow với KubernetesExecutor** hoặc **CeleryExecutor** kết hợp autoscaling để phân bổ các task độc lập ra hàng trăm node worker phân tán.
+
+## Câu hỏi riêng của bạn trên Metabase
+
+Câu SQL bạn thêm vào dashboard và điều nó cho biết:
+
+```sql
+select 
+    trip_id,
+    drive_id,
+    count(*) as tong_so_khung,
+    count(*) filter (where is_black or is_blurry or is_near_dup) as so_khung_bi_loai,
+    round(count(*) filter (where is_black or is_blurry or is_near_dup) * 100.0 / count(*), 2) as ty_le_loai_pct
+from marts.mart_frame_telemetry
+group by 1, 2
+order by ty_le_loai_pct desc
+limit 10;
+```
+- **Ý nghĩa & Diễn giải**: Câu truy vấn này phân tích chất lượng thu thập dữ liệu camera theo từng chuyến đi (trip). Nó giúp các kỹ sư Computer Vision và vận hành xe xác định những chuyến đi nào có tỷ lệ khung hình xấu (đen, mờ, đứng hình) cao nhất. Ví dụ, phát hiện trip có tỷ lệ loại bỏ trên 50% thường là do camera bị rung lắc mạnh, ống kính bị bụi bẩn bám dính hoặc xe bị kẹt xe đứng yên quá lâu trong hầm tối, từ đó phát cảnh báo bảo trì phần cứng camera của xe trước khi tiếp tục thu thập dữ liệu.
+
+## Nhìn lại
+
+Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
+
+- **Bất ngờ nhất**: Khái niệm Data Leakage khi chia dữ liệu Computer Vision. Trước đây tôi chỉ quen chia train/test ngẫu nhiên theo hàng; bài lab đã chứng minh bằng số liệu thực tế rằng chia theo khung hình làm rò rỉ 100% số trip sang tập test, tạo ra độ chính xác cao giả tạo.
+- **Điều còn băn khoăn**: Cách tối ưu hóa độ lệch đồng hồ (clock offset) tự động trong môi trường thực tế khi không có `sources.json` khai báo sẵn độ lệch 1500 ms (ví dụ dùng tương quan chéo tín hiệu gia tốc và tốc độ quang học để căn chỉnh).
+- **Lỗi dữ liệu pipeline chưa bắt được**: Khung hình bị lóa sáng quá mức (overexposure do ánh sáng mặt trời chiếu trực diện vào ống kính) hoặc giọt nước mưa đọng trên camera làm biến dạng vật thể; hiện pipeline mới chỉ bắt khung đen (`is_black`), thiếu sáng (`is_dark`) và nhòe do chuyển động (`is_blurry`).
